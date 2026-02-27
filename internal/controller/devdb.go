@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -249,6 +250,11 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 			},
 		},
 	}
+	// Read IMAGE_REGISTRY env var for pull-through cache support
+	imageRegistry := os.Getenv("IMAGE_REGISTRY")
+	if imageRegistry != "" && imageRegistry[len(imageRegistry)-1] != '/' {
+		imageRegistry += "/"
+	}
 	switch drv {
 	case dbv1alpha1.DriverPostgres:
 		// URLs
@@ -258,7 +264,7 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 			q.Set("search_path", "public")
 		}
 		// Containers
-		c.Image = "postgres:latest"
+		c.Image = imageRegistry + "postgres:latest"
 		c.Ports = []corev1.ContainerPort{
 			{Name: drv.String(), ContainerPort: 5432},
 		}
@@ -279,7 +285,7 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 			q.Set("mode", "DATABASE")
 		}
 		// Containers
-		c.Image = "mcr.microsoft.com/mssql/server:2022-latest"
+		c.Image = imageRegistry + "mcr.microsoft.com/mssql/server:2022-latest"
 		c.Ports = []corev1.ContainerPort{
 			{Name: drv.String(), ContainerPort: 1433},
 		}
@@ -309,7 +315,7 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 		// URLs
 		user, pass, path = "root", "pass", ""
 		// Containers
-		c.Image = "mysql:latest"
+		c.Image = imageRegistry + "mysql:latest"
 		c.Ports = []corev1.ContainerPort{
 			{Name: drv.String(), ContainerPort: 3306},
 		}
@@ -335,7 +341,7 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 		// URLs
 		user, pass, path = "root", "pass", ""
 		// Containers
-		c.Image = "mariadb:latest"
+		c.Image = imageRegistry + "mariadb:latest"
 		c.Ports = []corev1.ContainerPort{
 			{Name: drv.String(), ContainerPort: 3306},
 		}
@@ -361,7 +367,7 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 		// URLs
 		user, pass, path = "root", "pass", ""
 		// Containers
-		c.Image = "clickhouse/clickhouse-server:latest"
+		c.Image = imageRegistry + "clickhouse/clickhouse-server:latest"
 		c.Ports = []corev1.ContainerPort{
 			{Name: drv.String(), ContainerPort: 9000},
 		}
@@ -392,7 +398,7 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 			q.Set("search_path", "public")
 		}
 		// Containers
-		c.Image = "cockroachdb/cockroach:latest"
+		c.Image = imageRegistry + "cockroachdb/cockroach:latest"
 		c.Args = []string{
 			"start-single-node",
 			"--insecure",
@@ -416,6 +422,8 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 	default:
 		return nil, "", fmt.Errorf(`devdb: unsupported driver %q. You need to provide the devURL on the resource: https://atlasgo.io/integrations/kubernetes/operator#devurl`, drv)
 	}
+	// Apply resource requirements from environment variables
+	c.Resources = parseResourceRequirements()
 	conn := &url.URL{
 		Scheme:   c.Ports[0].Name,
 		User:     url.UserPassword(user, pass),
@@ -436,6 +444,33 @@ func AutomaticDevDBSpec(drv dbv1alpha1.Driver, schemaBound bool) (*corev1.PodSpe
 		Containers: []corev1.Container{c},
 		Volumes:    volumes,
 	}, conn.String(), nil
+}
+
+// parseResourceRequirements reads resource requirements from environment variables.
+// Supported env vars: DEVDB_RESOURCES_REQUESTS_CPU, DEVDB_RESOURCES_REQUESTS_MEMORY,
+// DEVDB_RESOURCES_LIMITS_CPU, DEVDB_RESOURCES_LIMITS_MEMORY.
+func parseResourceRequirements() corev1.ResourceRequirements {
+	rr := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{},
+		Limits:   corev1.ResourceList{},
+	}
+	envMap := map[string]struct {
+		list corev1.ResourceList
+		name corev1.ResourceName
+	}{
+		"DEVDB_RESOURCES_REQUESTS_CPU":    {rr.Requests, corev1.ResourceCPU},
+		"DEVDB_RESOURCES_REQUESTS_MEMORY": {rr.Requests, corev1.ResourceMemory},
+		"DEVDB_RESOURCES_LIMITS_CPU":      {rr.Limits, corev1.ResourceCPU},
+		"DEVDB_RESOURCES_LIMITS_MEMORY":   {rr.Limits, corev1.ResourceMemory},
+	}
+	for env, target := range envMap {
+		if v := os.Getenv(env); v != "" {
+			if q, err := resource.ParseQuantity(v); err == nil {
+				target.list[target.name] = q
+			}
+		}
+	}
+	return rr
 }
 
 func readyPod(pods []corev1.Pod) (*corev1.Pod, error) {
